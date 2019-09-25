@@ -1,0 +1,1283 @@
+---
+title: 'Project: detection of fluconazole resistance in C.albicans with MALDI-TOF
+  MS'
+author: "Margot Delavy"
+date: "8 août 2019"
+output: word_document
+---
+
+# Functions
+## 1.Spectra Processing
+
+### Function ID.QC
+This function remove the spectra that failed the first QC (identification Log(scores)) and the corresponding lines in the information file.
+* Spectra : the imported MALDI-TOF MS spectra
+* InfoFile: the file containing the informations relative to the spectra
+* thr: the minimal log(score) that should be obtained to accept the spectrum, by default, the value is set at 1.7
+
+```{r}
+ID.QC<-function(Spectra, InfoFile,thr=1.7){
+  InfoFile$pos<-1:length(InfoFile[,1])
+  keep.pos<-InfoFile$pos[InfoFile$LogScore>=thr]
+  keep.pos<-keep.pos[!is.na(keep.pos)]
+  InfoFile<-InfoFile[keep.pos,]
+  Spectra<-Spectra[keep.pos]
+  return(list(InfoFile,Spectra))
+}
+```
+
+### Function Rep.QC
+This function remove the spectra that failed the second QC (variability of the replicates) and the corresponding lines in the information file.
+* Spectra : the imported MALDI-TOF MS spectra
+* InfoFile: the file containing the informations relative to the spectra
+* thr1: the minimal CCI score that should be obtained between the technical duplicates, by default = 0.7
+* thr2: the minimal average CCI score that should be obtained between a spectrum and its biological replicates, by default = 0.5
+
+```{r}
+Rep.QC<-function(Spectra,InfoFile,thr1=0.7,thr2=0.5){
+  InfoFile$pos<-1:length(InfoFile[,1])
+  keep.pos1<-InfoFile$pos[InfoFile$CorrDuplicate>=thr1 & InfoFile$Mean_bioRep>=thr2]
+  keep.pos2<-numeric()
+  for(i in 1:length(InfoFile$pos)){
+    InfoDuplicate<-InfoFile[InfoFile$FileName==InfoFile$FileName[i],]
+    if(InfoDuplicate$CorrDuplicate[InfoDuplicate$pos==i]<thr1 && InfoDuplicate$Mean_bioRep[InfoDuplicate$pos==i]>=thr2 && length(InfoDuplicate[InfoDuplicate$Mean_bioRep>thr2,1])==1){
+      keep.pos2[i]<-InfoFile$pos[i]
+    }
+  }
+  keep.pos2<-keep.pos2[!is.na(keep.pos2)]
+  keep.pos1<-keep.pos1[!is.na(keep.pos1)]
+  keep.pos<-c(keep.pos1,keep.pos2)
+  keep.pos<-sort(unique(keep.pos))
+  InfoFile<-InfoFile[keep.pos,]
+  Spectra<-Spectra[keep.pos]
+  return(list(InfoFile,Spectra))
+}
+```
+
+### Function QC_Gibb
+This function verify that the spectra are not empty and have the same length
+
+* Spectra: the raw spectra
+
+```{r}
+QC_Gibb <-function(Spectra){
+  if(any(sapply(Spectra, isEmpty))==TRUE){
+    x=print("Warning: There is at least 1 empty spectra in the data set")
+  } #print a warning if a spectrum is empty
+  y<-table(sapply(Spectra, length))
+  return(y)#print the number and the length of the spectra
+  return(x)#print the warning if needed
+}
+```
+
+### Function Spect.Proc
+
+This functions followa Gibb pipeline to process the spectra
+
+* Data: the raw spectra
+* halfWindowSize: halfWindowSize parameter needed in the Gibb's pipeline
+* tolerance: tolerance parameter of the Gibb's pipeline to consider two detected peaks as the same 
+* SNR: signal-to-noise ratio parameter from the Gibb's pipeline. It specifies the ratio of noise needed to be passed to detect a peak
+* InfoSpectra: the spectra information file
+* warping : if TRUE, the alignment is performed on a list of reference peaks
+* refPeaks.mass: if specified, list of the m/z of the peaks used for the warping
+* warpingTolerance: the deviation to a peak allowed to consider the peaks as the same during the warping step. 
+* averageBy: determine if the spectra should be average by technical replicates ("replicate") or by strain ("strain"), by default = "replicate"
+
+```{r}
+Spect.Proc<-function(Data,halfWindowSize,tolerance,SNR,InfoSpectra,warping=F,refPeaks.mass, df=F,warpingTolerance=0.002,plot=T,averageBy="replicate"){
+  if(plot==T){
+    par(mfrow=c(3,3))
+    plot(Data[[1]], main="Raw spectrum")#plot the 1st raw spectrum
+  }
+  Data<-transformIntensity(Data,method="sqrt")##Stabilization of the variance by square transformation
+  if(plot==T){
+    plot(Data[[1]], main="Variance stabilized")#plot the 1st spectrum after the variance stabilization
+  }
+  Data<- smoothIntensity(Data, method="SavitzkyGolay",halfWindowSize=halfWindowSize)#smoothing of the spectra
+  if(plot==T){
+    baseline <- estimateBaseline(Data[[1]], method="SNIP",iterations=100)#determination of the baseline
+    plot(Data[[1]], main="Smooth spectrum and estimation of the baseline")
+    lines(baseline, col="red", lwd=2) #plot the 1st spectrum after the smoothing and show the baseline
+  }
+  Data <- removeBaseline(Data, method="SNIP",iterations=100)#removal of the baseline
+  if(plot==T){
+    plot(Data[[1]], main="Baseline removed")#plot the 1st spectrum after the removal of the baseline
+  }
+  Data <- calibrateIntensity(Data, method="TIC")#calibration of the intensity
+  if(plot==T){
+    plot(Data[[1]], main="Intensity calibration")#plot the 1st spectrum after calibration of its intensities
+  }
+  if(warping==F){
+    Data<- alignSpectra(Data,halfWindowSize=halfWindowSize, SNR=SNR,tolerance=tolerance,warpingMethod="lowess")#alignement of the spectra together
+    if(plot==T){
+      plot(Data[[1]], main = "Spectrum aligned") #plot the 1st spectrum after alignment
+    }
+  }
+  if(isTRUE(averageBy=="replicate")==TRUE){
+    sampleName<-InfoSpectra$FileName
+    avgData <- averageMassSpectra(Data, labels=sampleName,method="mean")#Create the average spectra
+  }
+  if(isTRUE(averageBy=="strain")==TRUE){
+    sampleName<-InfoSpectra$Strain
+    avgData <- averageMassSpectra(Data, labels=sampleName,method="mean")#Create the average spectra
+  }
+  if(plot==T){
+    plot(avgData[[1]], main= "Average Spectrum")#plot the 1st average spectrum
+  }
+  peaksData <- detectPeaks(avgData, method="MAD",halfWindowSize=halfWindowSize, SNR=SNR)#peaks detections
+  if(warping==T){
+    RefPeaks<-createMassPeaks(mass=refPeaks.mass,intensity=(rep(1,length(refPeaks.mass))))#create the peaks list of reference
+    wf<-determineWarpingFunctions(peaksData,reference=RefPeaks,tolerance=warpingTolerance)#determine the function needed to align the spectra on the reference peaks
+    peaksData<-warpMassPeaks(peaksData,wf)#apply the alignment on the peaks
+    avgData<-warpMassSpectra(avgData,wf)#apply the alignment on the spectra
+  }
+  peaksData <- binPeaks(peaksData, tolerance=tolerance)#merge the really close peaks
+  peaksData <- filterPeaks(peaksData, minFrequency=3/length(Data))#remove the peaks present in less than 3 spectra
+  if(plot==T){
+    noise <- estimateNoise(avgData[[1]])#estimate the noise
+    plot(avgData[[1]], main="Warping and Peaks detection") #plot the 1st spectra after the warping
+    points(peaksData[[1]], col="red", pch=4)#add the peaks
+    lines(noise[,1], noise[, 2]*3, col="blue")
+    plot(avgData[[1]], main="Peaks binning")#plot the spectra after the peaks binning
+    points(peaksData[[1]], col="red", pch=4)#add the peaks
+  }
+  featureMatrix <- intensityMatrix(peaksData, avgData)#creation of an intensity matrix
+  if(isTRUE(averageBy=="replicate")==TRUE){
+    ID<-as.character(InfoSpectra$FileName)#extract the file names 
+    ID<-as.factor(ID)
+    rownames(featureMatrix)<-unique(ID)#assign rownames
+  }
+  if(isTRUE(averageBy=="strain")==TRUE){
+    ID<-as.character(InfoSpectra$Strain)
+    ID<-as.factor(ID)
+    rownames(featureMatrix)<-unique(ID)
+  }
+  if(df==T){
+    featureMatrix<-as.data.frame(featureMatrix)#create the intensities matrix
+  }
+  
+  return(featureMatrix)
+  
+}
+
+```
+
+## 2. Intensity Normalisation
+
+### Function Intmedian
+
+This function calculates the median of each line or column of a dataframe.
+
+* Data: the initial data frame with at least two numeric variables
+* range: the range of lines/columns that must be taken in account to calculate the median
+* bycol: specifies if the median must be calculate by column (TRUE) or by line (FALSE)
+
+```{r}
+Intmedian<-function(data,range,bycol=TRUE){ 
+  Lrange<-length(range) #specify the number of lines/columns used for the calculations
+  med<-numeric(length=Lrange)#create the vector that will store the medians
+  if(bycol==TRUE){
+    for(i in 1:Lrange){
+      med[i]<-median(data[,i])#calculate the median by column
+    }
+  }else{
+    for(i in 1:Lrange){
+      med[i]<-median(as.numeric(data[i,])) #calculate the median by line
+    }
+  }
+  return(med)#return the vector with all the medians
+}
+
+```
+
+### Function NormHKP
+
+This function normalizes the intensities of all the peaks by the values of a specific column of the data frame
+
+* df: a numeric data frame that need to be normalized
+* peaks: the column used as reference for the normalization
+
+```{r}
+NormHKP<-function(df,peaks){
+  for(i in 1:length(df[,1])){
+    df[i,]<-df[i,]/peaks[i] #divide the columns by the specified column of the dataframe
+  }
+  return(df)
+}
+```
+
+### Function addInfo
+
+This function adds the informations relative to the spectra to the intensities matrix
+
+* intTable: an intensities matrix
+* info: the spectra information file
+* range: the columns of the information files that need to be added to the intensities matrix
+* condition: the condition in which the spectra were acquired (i.e BP, MAX or NULL)
+* averageBy: determine if the spectra should be average by technical replicates (replicate) or by strain (strain)
+
+```{r}
+addInfo<-function(intTable, info,range,averageBy="replicate"){
+  if(isTRUE(averageBy=="replicate")==TRUE){
+    FinalInfo<-subset(info[,range], !duplicated(FileName))
+    FinalInfo<-FinalInfo[!is.na(FinalInfo$FileName),]
+    rownames(FinalInfo)<-FinalInfo$FileName #add the rownames
+  }
+   if(isTRUE(averageBy=="strain")==TRUE){
+    FinalInfo<-subset(info[,range], !duplicated(Strain))
+    FinalInfo<-FinalInfo[!is.na(FinalInfo$Strain),]
+    rownames(FinalInfo)<-FinalInfo$Strain #add the rownames
+    FileName<-FinalInfo$Strain
+    FinalInfo$FileName<-FinalInfo$Strain
+  }
+  df<-cbind(intTable,FinalInfo)#bind the informations with the intensities matrix
+  #keep only the part of the data frame corresponding to the studied condition
+  return(df)
+}
+```
+
+### Function IntMIC
+
+This functions converts the MIC values in MIC intervals
+
+* data : a data frame with a column called "MIC", containing the MIC values
+* thrLow: the threshold of MIC below or equal to which the MIC is assessed as "Low"
+* thrMax: the threshold of MIC above or equal to which the MIC is assessed as "High"
+
+```{r}
+IntMIC<-function(data,thrLow, thrMax){
+  data$MICint<-data$MIC#create a new column
+  data$MICint[data$MIC<=thrLow]<-"Low" #replace the low MIC values by the category "Low"
+  data$MICint[data$MIC>thrLow&data$MIC<thrMax]<-NA #replace the medium MIC values by NA
+  data$MICint[data$MIC>=thrMax]<-"High" #replace the high MIC values by the category "High"
+  return(data)
+}
+```
+
+
+### Final Function: intMatrix2
+
+This function uses the raw Spectra acquired with MALDI-TOF MS. It remove the outliers indicated on the information file (InfoSpectra), treats the spectra following the Gibb's pipeline. Finally, the function creates an intensities matrix and normalizes the intensities with the median of the intensities of the spectrum. Be careful to the column of information to add !
+
+* all.Data: raw spectra
+* accessFile: the path to the file containing the informations relative to the spectra
+* misSpect: the position of the eventual missing spectra present in the information file
+* condition: the condition in which the spectra were acquired (i.e BP, MAX or NULL)
+* Processparameters : the parameters needed for the spectra processing, correspond to c(halfWindowSize, tolerance, SNR). See function Spect.Proc
+* rangeInfo: the columns of the information files that need to be added to the intensities matrix. If averaging by strains, the file name should not be comprised. 
+* thrMIC: the MIC values thresholds needed to define the MIC intervals (i.e. c(thrLow,thrMax)). See function IntMIC
+* HKpeaksFr: the peaks that should be used to warp the spectra. Default is NULL and the reference peaks are identified during the function
+* trimOutliers: must be TRUE to perform the QC of the variability of the spectra
+* thr.ID : minimum Log(Score) that a spectrum must obtained to be conserved
+* thr1: the minimal CCI score that should be obtained between the technical duplicates
+* thr2: the minimal average CCI score that should be obtained between a spectrum and its biological replicates
+* BTSspectra: spectra of the pure BTS, if BTS added during the spectra acquisition
+* averageBy: determine if the spectra should be average by technical replicates (replicate) or by strain (strain)
+
+```{r}
+intMatrix2<-function(all.Data,accessFile,misSpect=NULL,condition=NULL,Processparameters=c(10,1,3),rangeInfo=1:17,thrMIC=c(1,32),HKpeaksFr=NULL,trimOutliers=T, thr.ID=1.7, thr1=0.7, thr2=0.5,BTSspectra=NULL,averageBy="replicate"){
+ if(is.null(misSpect)==F){
+   all.Data<-all.Data[[-misSpect]]
+ }
+  InfoFile<-read.table(accessFile, sep=";", header=T)
+  QC1<-ID.QC(all.Data,InfoFile,thr.ID)
+  InfoFile<-QC1[[1]]
+  Data<-QC1[[2]]
+  QC2<-Rep.QC(Data, InfoFile, thr1, thr2)
+  InfoSpectra<-QC2[[1]]
+  Data<-QC2[[2]]
+  
+  if(is.null(condition)==F){
+    Data<-Data[which(InfoSpectra$Conditions==condition)];InfoSpectra=InfoSpectra[InfoSpectra$Conditions==condition,]#keep only the spectra acquired on a specified condition (MAX, BP or NULL) and corresponding informations 
+  }
+  if(is.null(BTSspectra)==F){
+    Data<-c(Data, BTSspectra)#add the BTS spectra
+        n1<-length(InfoSpectra$FileName)
+    n2<-length(BTSspectra)
+    InfoSpectra$FileName<-as.character(InfoSpectra$FileName)
+    InfoSpectra[(n1+1):(n1+n2),]<-NA
+    InfoSpectra$FileName[(n1+1):(n1+n2)]<-"BTS"
+    InfoSpectra$FileName<-as.factor(InfoSpectra$FileName)
+  }
+  intMatrix.warp<-Spect.Proc(Data,Processparameters[1],Processparameters[2],Processparameters[3],InfoSpectra,warping=T,refPeaks.mass=sort(HKpeaksFr$Var2),df=T,averageBy=averageBy)#The spectra are treated 
+  intMatrix.warp$median<-Intmedian(intMatrix.warp,1:length(intMatrix.warp[,1]),bycol=F) #For each spectrum, the median of the intensities of the peaks are calculated. See function IntMedian
+  NormMatrix<-NormHKP(df=intMatrix.warp,peak=intMatrix.warp$median) #The intensities of each spectrum are normalized by the medidian of intensities of the corresponding spectrum. See NormHKP function
+  if(is.null(BTSspectra)==F){
+    n1<-length(NormMatrix[,1])
+    meanBTS<-NormMatrix[n1,]
+   for(i in 1: length(NormMatrix[,1])){
+     NormMatrix[i,]<-NormMatrix[i,]-meanBTS #remove the mean intensities of each peak of the BTS spectra to each corresponding intensity of the others spectra
+   }
+   NormMatrix<-NormMatrix[1:(n1-1),]
+  }
+  if(isTRUE(averageBy=="replicate")==TRUE){
+  InfoSpectra<- subset(InfoSpectra, !duplicated(FileName))
+  }
+  if(isTRUE(averageBy=="strain")==TRUE){
+  InfoSpectra<- subset(InfoSpectra, !duplicated(Strain))
+  }
+  n<-length(NormMatrix[,1])
+  if(is.null(BTSspectra)==F){
+    BTSpeaks<-numeric()
+  for(i in 1:length(NormMatrix[1,])){
+    if(min(NormMatrix[,i])<=0){
+      BTSpeaks[i]<-i }else{
+      BTSpeaks[i]<-NA
+    }
+  }
+    BTSpeaks<-BTSpeaks[!is.na(BTSpeaks)]
+    NormMatrix<-NormMatrix[,-BTSpeaks]
+  }
+  NormMatrix<-addInfo(NormMatrix,InfoSpectra[1:(n),],rangeInfo,averageBy=averageBy) #Add the informations relative to each spectra to the intensities matrix. See function addInfo
+  
+  NormMatrix<-IntMIC(NormMatrix,thrMIC[1],thrMIC[2])#A new column is added to the matrix with the intervalles of MICs (High MIC, Low MIC or NA for the Medium MICs, which will removed from the corresponding analyses). See function IntMIC
+
+  return(list(NormMatrix,HKpeaksFr))#return the matrix normalized and the Housekeeping peaks. 
+}
+
+```
+
+
+## 4. Biostatistical approach : Models building
+### Functions PositionPeaks
+
+This function reduces a dataframe to the intensities of specifics peaks
+* data: the initial dataframe
+* peaks: the names of the columns that should be conserved
+* phePos: the position of the column corresponding to the studied phenotype in the initial dataframe
+
+```{r}
+PositionPeaks<-function(data,peaks,phePos){
+  pos<-numeric(length(peaks))
+  for(i in 1:length(peaks)){
+    pos[i]<-which(colnames(data)==peaks[i]) 
+  }
+  return(data[,c(pos,phePos)])
+}
+
+```
+
+### Function Intdist
+
+This function reduces the initial data frame by keeping only the columns corresponding to a list of specified peaks and formats the data frame.
+
+* data : the initial data frame 
+* Toprank: a data frame containing a column "peaks" with the name of the peaks that should be conserved
+* phenotypeName: the name of the column containing the informations about the phenotype
+
+```{r}
+Intdist<-function(data,Toprank,phenotypeName){
+  phePos<-which(colnames(data)==phenotypeName)#identify the column corresponding to the phenotype
+  df<-PositionPeaks(data,Toprank$peaks,phePos)#reduce a dataframe to specifics peaks. See function PositionPeaks
+  FileName<-rownames(df)#add the name of the spectra
+  df<-cbind(FileName,df)
+  df<-df[!is.na(df[[phenotypeName]]),]#remove the lines for which the phenotype is unknown
+  df[[phenotypeName]]<-as.factor(df[[phenotypeName]])#transform the phenotypes in factor
+  return(df)#return the new reduced data frame
+}
+
+```
+
+### Function FindPeak
+Created by Antoine Gürtler
+
+This function looks for the peak the closest to the one specified by using a sliding window
+
+* matrix: an intensities matrix
+* r : the right limit of the sliding window
+* l : the left limit of the sliding window
+* step : the size of the decreasing of the sliding window size at each round of the function
+
+```{r}
+FindPeak=function(matrix,r,l,step){
+  peak=subset(matrix, matrix[,1]>l & matrix[,1]<r) #select the peaks of the window
+  while(dim(peak)[1]>1){#decreases the size of the sliding window until only 1 peak was found in the window
+    r=r-step
+    peak=subset(matrix, matrix[,1]>l & matrix[,1]<r)
+    #print(peak)
+    l=l+step
+  }
+  return(peak)#return the peak that we were looking for
+}
+```
+
+### Function PrepareSet
+This function reduces an intensities dataframe to contain only the intensities of the reference peaks
+
+* CPeaks : a dataframe with a column "peak" in which the position on the reference peaks is stored 
+* df : an intensities dataframe
+* rangeNoNum: the number of column non numerical of the df (must be in the begining of the df)
+
+```{r}
+PrepareSet<-function(CPeaks,df,rangeNoNum=2){
+  Ref<-CPeaks$peak #isolate the signature peaks identified by the clustering
+  Ref<-as.numeric(Ref)
+  r<-1:rangeNoNum
+  set<-df[,-r]
+  peaks<-gsub( "X", "", as.character(colnames(set)))
+  peaks<-as.numeric(peaks)
+  colnames(set)<-peaks
+  tMatrix<-transpose(set) #the matrix is transposed to allow the utilisation of the FindPeak function
+  tMatrix<-cbind(colnames(set),tMatrix)
+  rownames(tMatrix)<-colnames(set)
+  colnames(tMatrix)<-c("peaks",rownames(set))
+  tMatrix[,1]<-as.numeric(as.character(tMatrix[,1]))
+  Pint<-matrix(ncol=length(colnames(tMatrix)),nrow=length(Ref))#create a new matrix to store the intensities of the found peaks
+  Pint[,1]<-Ref
+  Pint<-as.data.frame(Pint)
+  colnames(Pint)<-c("peaks",rownames(set))
+  rownames(Pint)<-Ref
+  for(i in 1:length(Ref)){
+    if(length(FindPeak(tMatrix,Ref[i]+3,Ref[i]-3,0.001)[,1])!=0){
+      Pint[i,]<-FindPeak(tMatrix,Ref[i]+3,Ref[i]-3,0.001)#find the columns corresponding to the signature peaks in the df
+    }else{
+      Pint[i,]<-c(Ref[i],rep(0,(length(colnames(tMatrix))-1)))#replace by 0 the intensities of the absent peaks
+    }
+  }
+  Pint<-Pint[,-1]
+  final<-transpose(Pint)#transpose back the matrix 
+  final<-as.data.frame(final)
+  final<-cbind(df[,r],final)
+  rownames(final)<-rownames(set)
+  colnames(final)<-c(colnames(df)[r],as.character(Ref))
+  
+  finalReduced=final[,-r]
+  x<-colSums(finalReduced) #remove the peaks not found in the data set (whose intensities = 0)
+  a=which(x==0)
+  if(length(a)!=0){
+  finalReduced<-finalReduced[,-a]
+  }
+  df<-cbind(final[,r],finalReduced)
+  colnames(df)<-c(colnames(final)[r],colnames(finalReduced))
+
+  return(df)
+}
+
+```
+ 
+### Function SplitSet
+This function split a data frame in a training, a testing and a validation set and return a list with the three sets. The function take in account the phenotype of the strain to allow a more homogenous distribution
+
+* df: a dataframe with a column "Phenotype" (levels "R" and "S")
+* prop1: the proportion that the validation set should represent
+* prop2: the proportion that the testing set should represent compared to the training set
+ 
+
+```{r}
+SplitSet<-function(df,prop1=0.25,prop2=0.33){
+  df<-as.data.frame(df)
+  strain<-df$Strain
+  R<-df$Strain[df$Phenotype=="R"]
+  S<-df$Strain[df$Phenotype=="S"]
+  r<-unique(R)
+  s<-unique(S)
+  
+  sampleS=sample(1:length(s),size=round(prop1*length(s),0), 
+                     replace=F)
+  
+  sampleR=sample(1:length(r),size=round(prop1*length(r),0), 
+             replace=F)
+  validStrain=c(as.character(s[sampleS]),as.character(r[sampleR]))
+  df$Strain<-as.character(df$Strain)
+  valid<-list()
+  for(i in 1:length(validStrain)){
+    valid[[i]]<-which(df$Strain==validStrain[[i]])
+  }
+  valid<-unlist(valid)
+  TestTrain<-df[-valid,]
+  valid<-df[valid,]
+  R2<-TestTrain$Strain[TestTrain$Phenotype=="R"]
+  S2<-TestTrain$Strain[TestTrain$Phenotype=="S"]
+  r2<-unique(R2)
+  s2<-unique(S2)
+  
+  sampleS2=sample(1:length(s2),size=round(prop2*length(s2),0), 
+                     replace=F)
+  sampleR2=sample(1:length(r2),size=round(prop2*length(r2),0), 
+                     replace=F)
+  testStrain=c(as.character(s2[sampleS2]),as.character(r2[sampleR2]))
+  test<-list()
+  for(i in 1:length(testStrain)){
+    test[[i]]<-which(df$Strain==testStrain[[i]])
+  }
+  test<-unlist(test)
+  test<-df[test,]
+  trainStrain=c(as.character(s2[-sampleS2]),as.character(r2[-sampleR2]))
+  train<-list()
+  for(i in 1:length(trainStrain)){
+    train[[i]]<-which(df$Strain==trainStrain[[i]])
+  }
+  train<-unlist(train)
+  train<-df[train,]
+  
+  test<-test[,-2]
+  train<-train[,-2]
+  valid<-valid[,-2]
+  
+  
+  return(list(train,test,valid))
+}
+
+```
+
+### Function PrepareSet2
+This function uses the functions PrepareSet and SplitSet to prepare the dataframe used for the test of the parameters of the models. 
+
+* condition: the FLC concentration at which the spectra were acquired ("BP","MAX","NULL")
+* cyclo: the cyclosporin A condition in which the spectra were acquired ("CYCLO", "NoCYCLO")
+* peakList1: detrmine if all the peaks ("AllPeaks") or only the signature peaks identified by clustering ("CPeaks") should be taken in account to built the model
+
+
+```{r}
+PrepareSet2<-function(condition, cyclo, peakList1){
+spectre=read.table(paste0("intMatrix",condition,"_",cyclo,".csv"),header=T)
+if(as.character(peakList1)=="CPeaks"){
+  CPeaks=read.table(paste0("C:/Users/margo/Google Drive/Master project/ProjectOptimization/CandidatePeaks_lists/",cyclo,"/CP.Phenotype.",condition,".csv"),header=T,sep=",")
+  spectre=PrepareSet(CPeaks,spectre)
+  write.table(spectre,paste0("intMatrix",condition,"_",cyclo,"_CPeaks.csv"))
+  spectre=read.table(paste0("intMatrix",condition,"_",cyclo,"_CPeaks.csv"))
+  df=as.data.frame(spectre)
+  split<-SplitSet(df,0.25,0.33) #divide the df in 3 subsets : training set, testing set and validation set
+  train=split[[1]];test=split[[2]];valid=split[[3]]
+  
+  #check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  ratioValid<-(length(valid$Phenotype[valid$Phenotype=="R"]))/(length(valid$Phenotype[valid$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5 & ratioValid>0.667 & ratioValid<1.5)
+  if(isTRUE(x)==F){
+    while(isTRUE(x)==F){ #redo a sampling until the conditions are met
+      df=as.data.frame(spectre)
+  split<-SplitSet(df,0.25,0.33) #divide the df in 3 subsets : training set, testing set and validation set
+  train=split[[1]];test=split[[2]];valid=split[[3]]
+  
+  #check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  ratioValid<-(length(valid$Phenotype[valid$Phenotype=="R"]))/(length(valid$Phenotype[valid$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5 & ratioValid>0.667 & ratioValid<1.5)
+    }
+  }
+  
+   
+}else{
+  df=as.data.frame(spectre)
+  split<-SplitSet(df,0.25,0.33) #divide the df in 3 subsets : training set, testing set and validation set
+  train=split[[1]];test=split[[2]];valid=split[[3]]
+  #check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  ratioValid<-(length(valid$Phenotype[valid$Phenotype=="R"]))/(length(valid$Phenotype[valid$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5 & ratioValid>0.667 & ratioValid<1.5)
+  if(isTRUE(x)==F){
+    while(isTRUE(x)==F){ #redo a sampling until the conditions are met
+      df=as.data.frame(spectre)
+  split<-SplitSet(df,0.25,0.33) #divide the df in 3 subsets : training set, testing set and validation set
+  train=split[[1]];test=split[[2]];valid=split[[3]]
+  
+  #check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  ratioValid<-(length(valid$Phenotype[valid$Phenotype=="R"]))/(length(valid$Phenotype[valid$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5 & ratioValid>0.667 & ratioValid<1.5)
+    }
+  }
+}
+df<-df[,-2]
+return(list(df,train,test,valid))
+}
+
+```
+
+
+### Function RF
+This function generate a randomForest model with a training set and test it on a testing set
+
+* train: training set with a column "Phenotype"
+* test: testing set set with a column "Phenotype"
+* ntree: number of tree generated by the randomForest
+* stats: if TRUE, in addition of the model, the function returns the accuracy and the confusion matrix associated to the model
+* plot: is TRUE is a plot should be returned
+
+```{r}
+RF<-function(train,test,ntree,stats=F,plot=F){
+  rf=randomForest(data=train,Phenotype ~ .,impurity='gini',ntree=ntree,replace=TRUE)
+  if(isTRUE(plot)==T){
+    plot(rf)
+  }
+  predictions=predict(rf,newdata=test,type="class")
+  actuals=test$Phenotype
+  confusion.matrix=table(actuals,predictions)
+  accuracy=sum(diag(confusion.matrix))/sum(confusion.matrix)
+  if(stats==T){
+    rf=list(rf,accuracy,confusion.matrix)
+    }
+  return(rf)
+  }
+```
+
+### Function ReducedRF
+This function reduces the train and test set to the peaks with the more importance as determined by the randomForest and create a new randomForest model with the reduced training set and test it on the reduced testing set
+
+* rf: a randomForest model
+* iThr: the threshold of importance to define which peaks should be conserved
+* train: training set with a column "Phenotype"
+* test: testing set set with a column "Phenotype"
+* ntree: number of tree generated by the randomForest
+* stats: if TRUE, in addition of the model, the function returns the accuracy and the confusion matrix associated to the model
+* plot: is TRUE is a plot should be returned
+
+```{r}
+ReducedRF<-function(rf,iThr,train,test,ntree,stats=F, plot=F){
+  i=as.data.frame(importance(rf))
+  if(isTRUE(plot)==T){
+    varImpPlot(rf)
+  }
+  j=rownames(i)[i[,1]>iThr] #keep only the most important variables
+  
+  n<-numeric()
+  for(k in 1:length(j)){
+    n[k]<-which(colnames(train)==j[k])#identify the position of the most important variable in the df
+  }
+  trainReduced<-cbind(train[,1],train[,n])
+  colnames(trainReduced)=c("Phenotype",colnames(train)[n])
+  testReduced<-cbind(test[,1],test[,n])
+  colnames(testReduced)=c("Phenotype",colnames(test)[n])
+  trainReduced<-cbind(train[,1],train[,n])
+  colnames(trainReduced)=c("Phenotype",colnames(train)[n])
+  testReduced<-cbind(test[,1],test[,n])
+  colnames(testReduced)=c("Phenotype",colnames(test)[n])
+  rf=randomForest(data=trainReduced,Phenotype ~ .,impurity='gini',ntree=ntree,replace=TRUE)
+  predictions=predict(rf,newdata=testReduced,type="class")
+  actuals=testReduced$Phenotype
+  confusion.matrix=table(actuals,predictions)
+  accuracy=sum(diag(confusion.matrix))/sum(confusion.matrix)
+  if(stats==T){
+    rf=list(rf,accuracy,confusion.matrix)
+  }
+  return(list(rf,trainReduced,testReduced))
+}
+```
+
+### Function Regression
+This function generate a logistical regression model on the training set and test it on the testing set
+
+* train: training set with a column "Phenotype"
+* test: testing set set with a column "Phenotype"
+* phe: vector of length two with the levels of the column "Phenotype"
+* stats: if TRUE, in addition of the model, the function returns the accuracy and the confusion matrix associated to the model
+
+```{r}
+Regression<-function(train,test,phe,stats=F){
+  g=glm(train$Phenotype ~ ., 
+        data=train,
+        family=binomial)
+  predictions=predict(g,newdata=test,type="response")
+  prepredictions=ifelse(predictions > 0.5,phe[2],phe[1])
+  actuals=test$Phenotype
+  confusion.matrix=table(actuals,prepredictions)
+  accuracy=sum(diag(confusion.matrix))/sum(confusion.matrix)
+  if(stats==T){
+    g=list(g,accuracy,confusion.matrix)
+  }
+  return(g)
+}
+```
+
+### Function LDA
+This function generate a linear discriminant analysis model on the training set and test it on the testing set
+
+* train: training set with a column "Phenotype"
+* test: testing set set with a column "Phenotype"
+* phe: vector of length two with the levels of the column "Phenotype"
+* stats: if TRUE, in addition of the model, the function returns the accuracy and the confusion matrix associated to the model
+* plot: is TRUE is a plot should be returned
+
+```{r}
+LDA<-function(train,test,phe,stats=F,plot=F){
+  ld=lda(Phenotype ~ .,train)
+  if(isTRUE(plot)==T){
+    plot(ld, col=ifelse(train$Phenotype==phe[1],2,3))
+  }
+  predictions=predict(ld,newdata=test,type="class")
+  actuals=test$Phenotype
+  confusion.matrix=table(actuals,predictions$class)
+  accuracy=sum(diag(confusion.matrix))/sum(confusion.matrix)
+  if(stats==T){
+    ld=list(ld,accuracy,confusion.matrix)
+  }
+  return(ld)
+}
+```
+
+### Function Models
+This function build a model and return the paramaters and the accuracy associated to each specific pipeline
+
+* train: training set with a column "Phenotype"
+* test: testing set set with a column "Phenotype"
+* ntree: number of tree generated by the randomForest
+* phe: vector of length two with the levels of the column "Phenotype"
+* iThr: the threshold of importance to define which peaks should be conserved
+* df : an intensities dataframe form which the training and testing set were extracted
+* peakList2: determine if the model should use all the peaks ("NA") or only the best discriminating peaks determined by randomForest ("Rfpeaks")
+* Test: determine which method should by used ("RF", "LDA" or "regression")
+* condition: the FLC concentration at which the spectra were acquired ("BP","MAX","NULL")
+* cyclo: the cyclosporin A condition in which the spectra were acquired ("CYCLO", "NoCYCLO")
+
+```{r}
+Models<-function(train,test,ntree,phe,iThr,df,peakList1,peakList2,Test,cyclo,condition){
+  rf=RF(train,test,ntree,stats=T)
+  g=Regression(train,test,phe,stats=T)
+  ld=LDA(train,test,phe,stats=T)
+  x=1
+  if(peakList2=="Rfpeaks"){
+    R.F=rf[[1]]
+    i=as.data.frame(importance(R.F))
+    j=rownames(i)[i[,1]>iThr]
+    if(length(j)<2){
+      x=0
+    }else{
+    rf=ReducedRF(rf[[1]],iThr,train,test,ntree,stats=T)
+    g=Regression(rf[[2]],rf[[3]],phe,stats=T)
+    ld=LDA(rf[[2]],rf[[3]],phe,stats=T)
+    rf=rf[[1]]
+    }
+  }
+  if(Test=="RF"){
+    model=rf
+  }
+  if(Test=="regression"){
+    model=g
+  }
+  if(Test=="LDA"){
+    model=ld
+  }
+  if(x==0){
+    model[[2]]=NA
+  }
+  v=c(cyclo,condition,peakList1,peakList2,Test,ntree,iThr,model[[2]])
+  return(v)
+}
+```
+
+### Function ModelsStats
+This function tests all the combinaisons of parameters to build biostatistical models and return the accuracy associated to each pipeline thus generated.
+
+* cyclo: a vector with the parametmers of cyclosporin A exposure that should be tested
+* condition :a vector with the parametmers of FLC concentration that should be tested
+* peakList1: a vector with the initial peaks list that should be tested, by default c("Allpeaks","CPeaks")
+* peakList2: a vector with the parameters that specify if the list peaks should be reduced to the RF peaks or not
+* Test: a vector with the models that should be built
+* ntree: a vector with the ntree value that should be tested
+* iThr: a vector with the iThr values that should be tested
+* phe: vector of length two with the levels of the column "Phenotype"
+
+
+```{r}
+ModelsStats<-function(cyclo,condition,peakList1="AllPeaks",peakList2,Test,ntree,iThr,phe){
+  models<-expand.grid(cyclo,condition,peakList1,peakList2,Test,ntree,iThr)#all the combinations of parameters are created
+  models<-as.data.frame(models)
+  colnames(models)=c("cyclo","condition","peakList1","peakList2","Test","ntree","iThr")
+  accuracy<-numeric()
+  pb<-tkProgressBar(title="progress bar",min=0,max=length(models[,1]),width=300) #create a progress bar
+  
+  #Create the sets
+  df.MAX.CYCLO.AllPeaks=PrepareSet2("MAX","CYCLO","AllPeaks")
+  df.BP.CYCLO.AllPeaks=PrepareSet2("BP","CYCLO","AllPeaks")
+  df.NULL.CYCLO.AllPeaks=PrepareSet2("NULL","CYCLO","AllPeaks")
+  df.MAX.NoCYCLO.AllPeaks=PrepareSet2("MAX","NoCYCLO","AllPeaks")
+  df.BP.NoCYCLO.AllPeaks=PrepareSet2("BP","NoCYCLO","AllPeaks")
+  df.NULL.NoCYCLO.AllPeaks=PrepareSet2("NULL","NoCYCLO","AllPeaks")
+
+  for(i in 1:length(models[,1])){
+    text=paste0("df.",models$condition[i],".",models$cyclo[i],".",models$peakList1[i])
+    df = eval(parse(text=text))
+    train=df[[2]];test=df[[3]];valid=df[[4]];df=df[[1]]
+    write.table(valid,paste0("ValidSet_",models$cyclo[i],"_",models$peakList1[i],"_",models$condition[i],".csv"))
+    write.table(train,paste0("TrainSet_",models$cyclo[i],"_",models$peakList1[i],"_",models$condition[i],".csv"))
+    write.table(test,paste0("TestSet_",models$cyclo[i],"_",models$peakList1[i],"_",models$condition[i],".csv"))
+    accuracy[i]<-Models(train=train,test=test,ntree=models$ntree[i],phe=phe,iThr=models$iThr[i],df=df,peakList1=models$peakList1[i],peakList2=models$peakList2[i],Test=models$Test[i],cyclo=models$cyclo[i],condition=models$condition[i])[8]
+    Sys.sleep(0.1)
+    setTkProgressBar(pb,i,label=paste(round(i/length(models[,1])*100,0),"% done"))#advance the progress bar
+  }
+  close(pb)
+  models$accuracy=accuracy
+  return(models)
+}
+```
+
+### Function BestModels
+This function extracts the best parameters of the models built with the ModelsStats function. To do so, the function first selects the models associated to the x % (prop) highest accuracies. Then, the function groups these models by their characterisitics (except ntree and iThr) and caculate the mean of accuracy obtain by each group of models (in the whole model data set). The models for which the mean of accuracy is lower than the threshold of accuracy previously determined (x % of highest accuracy), the models is exclued. This step allows a first assessment of the model's robustess since a robust model should not be too much influenced by the nTree or iThr. Then, for each remaining model, the best iThr parameter is determined (i.e. iThr associated to the best accuracy for a given model). Finally, the functions identifies how many trees are needed to produce a stable random Forest analysis (ntree = 500 or 1000 or 2000) and return the parameters and the associated accuracy of the best models. 
+
+* models: a dataframe obtained with the ModelsStats function
+* prop: the proportion of the best accuracy that should be extracted
+* ntree: a vector with the values of the ntree parameter that should be tested 
+* iThr: a vector with the values of the iThr parameter that should be tested 
+
+```{r}
+BestModels<-function(models,prop,ntree,iThr){
+  models<-models[order(models$accuracy,decreasing=T),]
+  models$accuracy=as.numeric(models$accuracy)
+  BestA<-models$accuracy[(length(models$accuracy)*prop)]#give the x% best accuracy
+  BestM<-models[models$accuracy>=BestA,]
+  BestM<-BestM[!is.na(BestM$cyclo),]
+  group<-unique(BestM[,c(1:5)])#determination of the best parameters (without ntree and iThr)
+  #for each model, determination of the best iThr and ntree parameters
+  nT<-numeric();iT<-numeric();A<-numeric()
+  
+  for(i in 1:length(group[,1])){
+    if(isTRUE(as.character(group$peakList2[i])=="NA")==T){
+      iT[i]<-"NA"
+      nT[i]<-"NA"
+    }else{
+      y=numeric()
+      for(j in 1:length(iThr)){
+        y[j]<-mean(models$accuracy[models$cyclo==group$cyclo[i] & models$condition==group$condition[i] & models$peakList1==group$peakList1[i] & models$peakList2==group$peakList2[i] & models$Test==group$Test[i] & models$iThr==iThr[j]] ,na.rm=T)
+      }
+      df<-data.frame("accuracy"=y,"iThr"=iThr)
+      df<-df[!is.na(df$accuracy),]
+      iT[i]<-df$iThr[df$accuracy==max(df$accuracy)][1]#determination of the iThr parameter associated with the best accuracy
+      y=numeric()
+      for(j in 1:length(ntree)){
+        y[j]<-mean(models$accuracy[models$cyclo==group$cyclo[i] & models$condition==group$condition[i] & models$peakList1==group$peakList1[i] & models$peakList2==group$peakList2[i] & models$Test==group$Test[i] & models$iThr==iT[i] & models$ntree==ntree[j]],na.rm=T)
+      }
+      df<-data.frame("accuracy"=y,"ntree"=ntree)
+      df<-df[!is.na(df$accuracy),]
+      while(length(unique(df$accuracy))>1){ #identify which lowest ntree allow a stability of the random forest analysis. 
+        df<-df[-1,]
+      }
+      nT[i]<-df$ntree[df$ntree==min(df$ntree)]
+  
+    }
+  }
+  group$ntree<-as.character(nT)
+  group$iThr<-as.character(iT)
+  for(i in 1:length(group$cyclo)){
+    A[i]<-mean(models$accuracy[models$cyclo==group$cyclo[i] & models$condition==group$condition[i] & models$peakList1==group$peakList1[i] & models$peakList2==group$peakList2[i] & models$Test==group$Test[i] & models$iThr==group$iThr[i] & models$ntree==group$ntree[i]],na.rm=T)
+  }
+  group$accuracy<-A
+  best<-group[group$accuracy>=BestA,]
+  return(group)
+}
+
+
+
+
+
+
+
+   
+    
+   
+```
+
+
+## 5. Biostatistical method: Control of the models' stability
+
+### Function Stability
+This function iteratively and randomly split a dataframe in a training and a testing set and generate and test a given model. The accuracy obtained at each iteration of the function is returned.
+
+* TrainTest: a dataframe with a column "Phenotype" (levels=c("R","S"))
+* prop: proportion of the initial dataframe that the training set should represent
+* peakList2: determine if the model should use all the peaks ("NA") or only the best discriminating peaks determined by randomForest ("Rfpeaks")
+* Test: determine which method should by used ("RF", "LDA" or "regression")
+* iThr: the threshold of importance to define which peaks should be conserved
+* ntree: number of tree generated by the randomForest
+* iteration: number of round of the function
+
+```{r}
+Stability<-function(TrainTest,prop,peakList2,Test,ntree,iThr,iteration){
+  accuracyAll=numeric()
+  RTest<-numeric()
+  RTrain<-numeric()
+  STest<-numeric()
+  STrain<-numeric()
+  for(j in 1:iteration){
+    #1.split the dataset in a training set and a testing set (randomly)
+    df<-as.data.frame(TrainTest)
+    R<-df$Strain[df$Phenotype=="R"]
+    S<-df$Strain[df$Phenotype=="S"]
+    r<-unique(R) #give the names of the resistant strains
+    s<-unique(S) #idem for the susceptible ones
+    sampleS=sample.int(n=length(s),size=floor(prop*length(s)), 
+                       replace=F) #sample the susceptible strains
+    sampleR=sample.int(n=length(r),size=floor(prop*length(r)), 
+                       replace=F) #sample the resistant strains
+    trainStrain=c(as.character(s[sampleS]),as.character(r[sampleR]))#list the strains that will constitute the training set
+    df$Strain<-as.character(df$Strain)
+    train<-list()
+    for(i in 1:length(trainStrain)){
+      train[[i]]<-which(df$Strain==trainStrain[[i]])
+    } #identify the positions of these strains in the original dataframe
+    train<-unlist(train)
+    test<-df[-train,-2] #create the testing sets with the remaining strains and remove the strain column
+    train<-df[train,-2] #create the training sets with the sampled strains and remove the strain column
+    df<-df[,-2]
+#check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5)
+  if(isTRUE(x)==F){
+    while(isTRUE(x)==F){ #redo a sampling until the conditions are met
+      df=as.data.frame(spectre)
+  split<-SplitSet(df,0.25,0.33) #divide the df in 3 subsets : training set, testing set and validation set
+  train=split[[1]];test=split[[2]];valid=split[[3]]
+  #check if the df are well distributed
+  ratioTrain<-(length(train$Phenotype[train$Phenotype=="R"]))/(length(train$Phenotype[train$Phenotype=="S"]))
+  ratioTest<-(length(test$Phenotype[test$Phenotype=="R"]))/(length(test$Phenotype[test$Phenotype=="S"]))
+  x<-isTRUE(ratioTrain>0.667 & ratioTrain<1.5 & ratioTest>0.667 & ratioTest<1.5)
+    }
+  }
+    
+    #2.generate the models with the training set and test it on the testing set
+    rf=RF(train,test,ntree,stats = T)
+    reg=Regression(train,test,phe,stats=T)
+    ld=LDA(train,test,phe,stats=T)
+    
+    if(peakList2=="Rfpeaks"){
+      imp<-as.data.frame(importance(rf[[1]]))
+      impRed<-imp[imp$MeanDecreaseGini>iThr,]
+      while(length(impRed)<2){
+        iThr<-iThr-0.1
+        impRed<-imp[imp$MeanDecreaseGini>iThr,]
+      }
+      rf=ReducedRF(rf[[1]],iThr,train,test,ntree,stats = T)
+      reg=Regression(rf[[2]],rf[[3]],phe,stats=T)
+      ld=LDA(rf[[2]],rf[[3]],phe,stats=T)
+      rf=rf[[1]]
+    }
+    if(Test=="LDA"){
+      accuracy<-ld[[2]]
+    }
+    if(Test=="RF"){
+      accuracy<-rf[[2]]
+    }
+    if(Test=="regression"){
+      accuracy<-reg[[2]]
+    }
+    
+    #3. Store the accuracy associated to the test
+    accuracyAll[j]<-accuracy 
+  }
+  results<-data.frame(accuracy=accuracyAll)
+
+  return(list(results,iThr))
+}
+```
+
+### Function TestStability
+This function uses the Stability function to test the variation of the accuracy associated to specifics models parameters. It return the accuracy obtained at each round of the Stability function
+
+* condition: the FLC concentration at which the spectra were acquired ("BP","MAX","NULL")
+* cyclo: the cyclosporin A condition in which the spectra were acquired ("CYCLO", "NoCYCLO")
+* peakList1: detrmine if all the peaks ("AllPeaks") or only the signature peaks identified by clustering ("CPeaks") should be taken in account to built the model 
+* peakList2: determine if the model should use all the peaks ("NA") or only the best discriminating peaks determined by randomForest ("Rfpeaks")
+* prop: proportion of the initial dataframe that the training set should represent
+* Test: determine which method should by used ("RF", "LDA" or "regression")
+* iThr: the threshold of importance to define which peaks should be conserved
+* ntree: number of tree generated by the randomForest
+* iteration: number of round of the function
+
+```{r}
+TestStability<-function(condition,cyclo,peakList1,peakList2,prop=0.667,ntree=500,iThr=0.3,iteration=100,Test){
+  #import the intensities matrices and the validation set
+  spectre=read.table(paste0("intMatrix",condition,"_",cyclo,".csv"),header=T)#full matrix
+  FileNameSpectre<-rownames(spectre)
+  valid<-read.table(paste0("ValidSet_",cyclo,"_",peakList1,"_",condition,".csv"),header=T,sep=" ")
+  FileNameValid=rownames(valid)
+  n<-numeric()
+  for(i in 1:length(valid$FileName)){
+    n[i]<-which(FileNameSpectre==FileNameValid[i])
+  }#identify which lines of the full matrix correspond to the validation set
+  TrainTest<-spectre[-n,] #remove the lines of the validation set
+  if(is.na(ntree)){
+    ntree<-500
+  }
+  if(is.na(iThr)){
+    iThr<-0
+  }
+  results<-Stability(TrainTest,prop,peakList2,Test,ntree,iThr,iteration)
+  return(results)
+}
+```
+
+### Function AllModelsStability
+This function performs the Test Stability functions on all the models given in a dataframe and return the accuracy obtained at each round and the models dataframe actualised.
+
+* models: a dataframe, obtained with the function BestModels, which contains the parameters of the models whose stability should be tested
+* iteration: number of round of the function
+
+```{r}
+
+AllModelsStability<-function(models,iteration){
+  models$ntree=as.numeric(models$ntree);models$iThr=as.numeric(models$iThr)
+  stability=list()
+  pb<-tkProgressBar(title="progress bar",min=0,max=length(models[,1]),width=300) #create a progress bar
+  for(i in 1:length(models[,1])){
+    test<-TestStability(condition=models$condition[i],cyclo=models$cyclo[i],peakList1=models$peakList1[i],peakList2=models$peakList2[i],prop=0.667,ntree=models$ntree[i],iThr=models$iThr[i],Test=models$Test[i],iteration)
+    modelSt<-test[[1]]
+    #if the iThr value had been modified, the value is changed in the df initial
+    models$iThr[i]<-test[[2]]
+  
+    stability[[i]]<-modelSt
+    stability[[i]]$model<-rep(i,length(stability[[i]]$accuracy))
+    Sys.sleep(0.1)
+    setTkProgressBar(pb, i, label=paste( round(i/length(models[,1])*100, 0),
+                                        "% done"))
+  }
+  close(pb)
+  stability<-do.call(rbind,stability)
+  return(list(models,stability))
+}
+
+  
+```
+
+## 6. Validation of the models
+
+### Function ValidationFinalModel
+
+```{r}
+ValidationFinalModel<-function(model, accessFileMatrices){
+  
+   #1.Import the 3 sets (training, testing, validation)
+  train<-read.table(paste0(accessFileMatrices,"/","TrainSet_",model$cyclo,"_",model$peakList1,"_",model$condition,".csv"),header=T,sep=" ")
+  test<-read.table(paste0(accessFileMatrices,"/","TestSet_",model$cyclo,"_",model$peakList1,"_",model$condition,".csv"),header=T,sep=" ")
+  valid<-read.table(paste0(accessFileMatrices,"/","ValidSet_",model$cyclo,"_",model$peakList1,"_",model$condition,".csv"),header=T,sep=" ")
+  
+  
+  #2. Identify the parameter of the model
+  trainTest<-rbind(train, test)
+  if(is.na(model$ntree)==TRUE){
+      model$ntree=1000
+    }
+    rf=randomForest(data=trainTest,Phenotype ~ .,impurity='gini',ntree=model$ntree,replace=TRUE)
+    Finalmodel=rf
+    par(mfrow=c(1,1))
+  
+    if(model$Test=="regression"){
+      Finalmodel=glm(trainTest$Phenotype ~ ., data=trainTest,family=binomial)
+    }
+    if(model$Test=="LDA"){
+      Finalmodel=lda(Phenotype ~ .,trainTest)
+    }
+    
+    #if the models should use the reduced list of peaks
+    if(model$peakList2=="Rfpeaks"){
+      #reduce the peaks lits
+      imp=as.data.frame(importance(rf))
+      j=rownames(imp)[imp[,1]>model$iThr]#keep only the most important variables
+      n<-numeric()
+      for(o in 1:length(j)){
+        n[o]<-which(colnames(trainTest)==j[o])#identify the position of the most important variable in the df
+      }
+      trainTestReduced<-cbind(trainTest[,1],trainTest[,n]) 
+      colnames(trainTestReduced)=c("Phenotype",colnames(trainTest)[n])
+      #create the models
+      if(model$Test=="RF"){
+        Finalmodel=randomForest(data=trainTestReduced,Phenotype ~ .,impurity='gini',ntree=model$ntree,replace=TRUE)
+      }
+      if(model$Test=="regression"){
+        Finalmodel=glm(trainTestReduced$Phenotype ~ ., data=trainTestReduced,family=binomial)
+      }
+      if(model$Test=="LDA"){
+        Finalmodel=lda(Phenotype ~ .,trainTestReduced)
+      }
+    }
+    
+    #3. validation of the model
+    
+    if(model$peakList2=="Rfpeaks"){
+      n<-which(colnames(valid)==colnames(trainTestReduced))
+      valid<-valid[,n]
+    }
+    if(model$Test!="regression"){
+      predictions=predict(Finalmodel,newdata=valid,type="class")
+    }
+    if(model$Test=="regression"){
+      predictions=predict(Finalmodel,newdata=valid,type="response")
+      score=predictions
+      predictions=ifelse(predictions > 0.5,"S","R")
+    }
+    if(model$Test=="LDA"){
+      score=predictions$x
+      posterior.R=predictions$posterior[,1]
+      posterior.S=predictions$posterior[,2]
+      predictions=predictions$class
+    }
+    if(model$Test=="RF"){
+      score=predict(Finalmodel,newdata=valid,type="vote")
+      score=score[,1]/score[,2]
+    }
+    actuals=valid$Phenotype
+    
+    results<-data.frame("FileName"=rownames(valid),"Prediction"=predictions,"Phenotype"=actuals,"Score"=score)
+  
+    results$Validation<-NA
+    results$Validation=as.character(results$Validation)
+    for(b in 1:length(results[,1])){
+      if(isTRUE(as.character(results$Phenotype[b])==as.character(results$Prediction[b]))==T){
+        results$Validation[b]<-"TRUE"
+      }else{
+        results$Validation[b]<-"FALSE"
+      }
+    }
+    accuracy=length(results$Validation[results$Validation=="TRUE"])/length(results$Validation)
+    specificity= length(results$Validation[results$Phenotype=="S"&results$Prediction=="S"])/length(results$Validation[results$Phenotype=="S"])
+    sensitivity= length(results$Validation[results$Phenotype=="R"& results$Prediction=="R"])/length(results$Validation[results$Phenotype=="R"])
+    
+
+    
+    return(list(Finalmodel,results,c(accuracy=accuracy,specificity=specificity, sensitivity=sensitivity)))
+}
+
+```
+
+
+
+# Pipeline "Research and Validation"
+
+##Packages installation
+```{r,results='hide'}
+library(MALDIquant,warn.conflicts=F, quietly=T)
+library(MALDIquantForeign,warn.conflicts=F, quietly=T)
+library(sda,warn.conflicts=F, quietly=T)
+library(crossval,warn.conflicts=F, quietly=T)            
+library(devtools,warn.conflicts=F, quietly=T)
+library(MALDIrppa,warn.conflicts=F, quietly=T)
+library(ggfortify,warn.conflicts=F, quietly=T)
+library(ggplot2,warn.conflicts=F, quietly=T)
+library(rlist,warn.conflicts=F, quietly=T)
+library(R.utils,warn.conflicts=F, quietly=T)
+library(tcltk,warn.conflicts=F, quietly=T)
+library(pROC,warn.conflicts=F, quietly=T)
+library(gplots,warn.conflicts=F, quietly=T)
+library(dendextend,warn.conflicts=F, quietly=T)
+library(data.table,warn.conflicts=F, quietly=T)
+library(ggfortify,warn.conflicts=F, quietly=T)
+library(randomForest,warn.conflicts=F, quietly=T)
+library(MASS,warn.conflicts=F, quietly=T)
+```
+
+## Enter the parameters
+
+```{r,results='hide'}
+phenotype="Phenotype"
+phe=c("R","S")
+averageBy="replicate"
+```
+
+## Enter the path to the folders where the siles should be saved
+
+```{r setup, include=FALSE, echo=FALSE}
+require("knitr")
+opts_knit$set(root.dir = "C:/Users/margo/Documents/Models/Final")
+```
+
+## 1. Spectra Processing and Quality Controls
+
+### Importation of the Housekeeping peaks (in needed to be obtained separately) 
+```{r,results='hide'}
+HK<-read.table("C:/Users/margo/Google Drive/Master project/ProjectOptimization/Bruker_HKpeaks.csv",sep=";",header=T)
+HK<-HK[HK$tolerance==3,]
+HK$Var2<-HK$Hkpeak
+```
+
+### Creation of the median normalized intensitiy matrix for the three condition (BPC, MAX, NULL)
+
+```{r,results='hide'}
+all.Data.CYCLO=importMzXml("C:/Users/margo/Google Drive/Master project/ProjectOptimization/Spectra_ClinicalStrains/CYCLO")
+all.Data.NoCYCLO=importMzXml("C:/Users/margo/Google Drive/Master project/ProjectOptimization/Spectra_ClinicalStrains/NoCYCLO")
+accessFile.CYCLO="C:/Users/margo/Google Drive/Master project/ProjectOptimization/InfoStrains_CYCLO.csv"
+accessFile.NoCYCLO="C:/Users/margo/Google Drive/Master project/ProjectOptimization/InfoStrains_NoCYCLO.csv"
+#access for the files with the informations on the spectra
+
+Norm.BP.CYCLO<-intMatrix2(all.Data.CYCLO,accessFile.CYCLO,condition="BP",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+Norm.MAX.CYCLO<-intMatrix2(all.Data.CYCLO,accessFile.CYCLO,condition="MAX",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+Norm.NULL.CYCLO<-intMatrix2(all.Data.CYCLO,accessFile.CYCLO,condition="NULL",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+
+Norm.BP.NoCYCLO<-intMatrix2(all.Data.NoCYCLO,accessFile.NoCYCLO,condition="BP",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+Norm.MAX.NoCYCLO<-intMatrix2(all.Data.NoCYCLO,accessFile.NoCYCLO,condition="MAX",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+Norm.NULL.NoCYCLO<-intMatrix2(all.Data.NoCYCLO,accessFile.NoCYCLO,condition="NULL",HKpeaksFr=HK,Processparameters=c(10,1,3),averageBy=averageBy)[[1]]
+
+# Remove the spectra with unknown phenotype
+  Norm.BP.CYCLO<-Norm.BP.CYCLO[!is.na(Norm.BP.CYCLO[[phenotype]]),] 
+  Norm.MAX.CYCLO<-Norm.MAX.CYCLO[!is.na(Norm.MAX.CYCLO[[phenotype]]),]
+  Norm.NULL.CYCLO<-Norm.NULL.CYCLO[!is.na(Norm.NULL.CYCLO[[phenotype]]),]
+  Norm.BP.NoCYCLO<-Norm.BP.NoCYCLO[!is.na(Norm.BP.NoCYCLO[[phenotype]]),] 
+  Norm.MAX.NoCYCLO<-Norm.MAX.NoCYCLO[!is.na(Norm.MAX.NoCYCLO[[phenotype]]),]
+  Norm.NULL.NoCYCLO<-Norm.NULL.NoCYCLO[!is.na(Norm.NULL.NoCYCLO[[phenotype]]),]
+  
+# Save the dataframes
+save.BP.CYCLO<-cbind(Norm.BP.CYCLO$Phenotype,Norm.BP.CYCLO$Strain,Norm.BP.CYCLO[,1:(which(colnames(Norm.BP.CYCLO)=="median")-1)]);colnames(save.BP.CYCLO)[1:2]=c(phenotype,"Strain");write.table(save.BP.CYCLO,"intMatrixBP_CYCLO.csv")
+save.MAX.CYCLO<-cbind(Norm.MAX.CYCLO$Phenotype,Norm.MAX.CYCLO$Strain,Norm.MAX.CYCLO[,1:(which(colnames(Norm.MAX.CYCLO)=="median")-1)]);colnames(save.MAX.CYCLO)[1:2]=c(phenotype,"Strain");write.table(save.MAX.CYCLO,"intMatrixMAX_CYCLO.csv")
+save.NULL.CYCLO<-cbind(Norm.NULL.CYCLO$Phenotype,Norm.NULL.CYCLO$Strain,Norm.NULL.CYCLO[,1:(which(colnames(Norm.NULL.CYCLO)=="median")-1)]);colnames(save.NULL.CYCLO)[1:2]=c(phenotype,"Strain");write.table(save.NULL.CYCLO,"intMatrixNULL_CYCLO.csv")
+
+save.BP.NoCYCLO<-cbind(Norm.BP.NoCYCLO$Phenotype,Norm.BP.NoCYCLO$Strain,Norm.BP.NoCYCLO[,1:(which(colnames(Norm.BP.NoCYCLO)=="median")-1)]);colnames(save.BP.NoCYCLO)[1:2]=c(phenotype,"Strain");write.table(save.BP.NoCYCLO,"intMatrixBP_NoCYCLO.csv")
+save.MAX.NoCYCLO<-cbind(Norm.MAX.NoCYCLO$Phenotype,Norm.MAX.NoCYCLO$Strain,Norm.MAX.NoCYCLO[,1:(which(colnames(Norm.MAX.NoCYCLO)=="median")-1)]);colnames(save.MAX.NoCYCLO)[1:2]=c(phenotype,"Strain");write.table(save.MAX.NoCYCLO,"intMatrixMAX_NoCYCLO.csv")
+save.NULL.NoCYCLO<-cbind(Norm.NULL.NoCYCLO$Phenotype,Norm.NULL.NoCYCLO$Strain,Norm.NULL.NoCYCLO[,1:(which(colnames(Norm.NULL.NoCYCLO)=="median")-1)]);colnames(save.NULL.NoCYCLO)[1:2]=c(phenotype,"Strain");write.table(save.NULL.NoCYCLO,"intMatrixNULL_NoCYCLO.csv")
+```
+
+
+## 2. Biostatistical approach
+
+### Models building
+
+All the different combination of parameters are tested and a summary table is generated and saved. It should be noted that because of the great variability of the results, theaccuracy associated to each model can vary. Therefore, once the table generated, it should be saved to continue to work with. (The stability issue is taken in account in a later step).
+
+```{r,results='hide'}
+
+models<-ModelsStats(c("CYCLO","NoCYCLO"),c("BP","MAX","NULL"),peakList1=c("AllPeaks"),peakList2=c("NA","Rfpeaks"),Test=c("RF","regression","LDA"),ntree=c(500,1000,2000),iThr=c(0.3,0.4,0.5),phe)
+models$ntree[models$peakList2=="NA"]<-"NA";models$iThr[models$peakList2=="NA"]<-"NA" #remove the values of nTree and iThr where they do not apply
+models<-models[!is.na(models$accuracy),]
+write.table(models,"Models.csv")
+```
+
+
+### Best models selection
+
+```{r,results='hide'}
+BestM<-BestModels(models,0.15,ntree=c(500,1000,2000),iThr=c(0.3,0.4,0.5))
+write.table(BestM,"BestModels.csv")
+
+```
+
+### Verification of the best models stability
+
+At this point, we iteratively test multiple combinations of the training and testing sets and store the associated accuracy. The models for which the Min. value (boxplot) is under 50% of accuracy will be removed.
+
+```{r,results='hide'}
+stability<-AllModelsStability(BestM,100)
+BestM<-stability[[1]]
+stability<-stability[[2]]
+png("GraphRobustness.jpeg")
+boxplot(stability$accuracy~as.character(stability$model))
+dev.off()
+
+#remove the models for which the Min. value (boxplot) is under 50% of accuracy will be removed
+stats<-boxplot(stability$accuracy~as.character(stability$model))$stats
+stats2<-data.frame(models=as.numeric(boxplot(stability$accuracy~as.character(stability$model))$names),median=stats[3,],deviation=(stats[5,]-stats[1,])/2)
+stats2<-stats2[order(stats2$models,decreasing=F),]
+stats2$sd<-aggregate(stability$accuracy,list(stability$model),sd)
+write.table(stats2,"StatsRobustess.csv")
+
+```
+
+##3 Generation of the final model parameters and validation
+At this point, you should choose the best model based on the informations gathered in the last step. 
+
+```{r,results='hide'}
+validation=ValidationFinalModel(StM,accessFileMatrices = "C:/Users/margo/Documents/Models/Final")
+
+saveRDS(validation[[1]], "./FinalModel.rds")# save the model
+write.table(validation[[1]]$scaling, "C:/Users/margo/Documents/Models/Final/LD1.csv")
+stats<-validation[[3]]
+write.table(stats,"C:/Users/margo/Documents/Models/Final/statsValidation.csv")
+prediction<-validation[[2]]
+write.table(prediction,"C:/Users/margo/Documents/Models/Final/PredictionValidation.csv")
+```
+
+
+
+
